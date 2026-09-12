@@ -41,8 +41,10 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
 
     private static final int NOTIFICATION_ID = 7002;
     private static final String CHANNEL_ID = "duo_effect";
-    private static final float ARM_ANGLE = 173f;
-    private static final float TRIGGER_ANGLE = 167f;
+    private static final float DEFAULT_OPEN_REFERENCE = 175f;
+    private static final float MIN_ARM_ANGLE = 168f;
+    private static final float TRIGGER_DELTA = 2.0f;
+    private static final long PREFETCH_INTERVAL_MS = 450L;
 
     private final Handler main = new Handler(android.os.Looper.getMainLooper());
     private HandlerThread captureThread;
@@ -61,16 +63,19 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
     private int captureWidth;
     private int captureHeight;
     private boolean captureRequested = false;
+    private boolean captureShouldShow = false;
     private boolean pendingDemo = false;
     private Bitmap frozenFrame;
+    private Bitmap prefetchedFrame;
+    private long lastPrefetchMs = 0L;
 
     private SensorManager sensorManager;
     private Sensor hingeSensor;
     private Float firstRaw;
-    private float lastAngle = 180f;
-    private float smoothedAngle = 180f;
+    private float smoothedAngle = DEFAULT_OPEN_REFERENCE;
     private boolean hasAngle = false;
     private boolean foldArmed = true;
+    private float openReferenceAngle = DEFAULT_OPEN_REFERENCE;
 
     private DisplayManager displayManager;
     private ValueAnimator demoAnimator;
@@ -91,7 +96,7 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
         createOverlayView();
         if (displayManager != null) displayManager.registerDisplayListener(this, main);
         if (sensorManager != null && hingeSensor != null) {
-            sensorManager.registerListener(this, hingeSensor, SensorManager.SENSOR_DELAY_GAME, main);
+            sensorManager.registerListener(this, hingeSensor, SensorManager.SENSOR_DELAY_FASTEST, main);
         }
     }
 
@@ -105,7 +110,7 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
         if (ACTION_DEMO_CLOSE.equals(action)) {
             if (projection != null) {
                 pendingDemo = true;
-                requestFreshFrame();
+                requestFrame(true);
             }
             return START_STICKY;
         }
@@ -132,8 +137,8 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
                 PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT);
         Notification n = new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_menu_view)
-                .setContentTitle("X Fold Duo Effect 正在待命")
-                .setContentText("铰链开始合拢时触发固定投影与渐进模糊")
+                .setContentTitle("X Fold Duo Effect v0.3 正在待命")
+                .setContentText("已监听 vivo foldstatus；开始合拢时会立即叠加 Duo 过渡")
                 .setContentIntent(pi)
                 .setOngoing(true)
                 .build();
@@ -158,10 +163,11 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
             projection.registerCallback(new MediaProjection.Callback() {
                 @Override public void onStop() { main.post(() -> stopSelf()); }
                 @Override public void onCapturedContentResize(int width, int height) {
-                    main.postDelayed(DuoEffectService.this::resizeCaptureToCurrentScreen, 80);
+                    main.postDelayed(DuoEffectService.this::resizeCaptureToCurrentScreen, 60);
                 }
             }, captureHandler);
             createVirtualDisplayForCurrentScreen();
+            main.postDelayed(() -> requestFrame(false), 220);
         } catch (SecurityException e) {
             stopSelf();
         }
@@ -169,12 +175,13 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
 
     private void createOverlayView() {
         overlayView = new DuoOverlayView(overlayContext);
+        overlayView.setOpenReference(openReferenceAngle);
         overlayView.setSizeModeListener(cover -> {
             if (cover == lastCoverAspect) return;
             lastCoverAspect = cover;
             if (cover && overlayVisible && frozenFrame != null) {
                 overlayView.beginCoverReveal();
-                main.postDelayed(this::hideOverlay, 455);
+                main.postDelayed(this::hideOverlay, 420);
             } else if (!cover && overlayVisible) {
                 overlayView.setInnerMode();
             }
@@ -206,7 +213,9 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
         if (frame == null) return;
         ensureOverlayAdded();
         if (!overlayAdded) return;
+        if (frozenFrame != null && frozenFrame != frame && !frozenFrame.isRecycled()) frozenFrame.recycle();
         frozenFrame = frame;
+        overlayView.setOpenReference(openReferenceAngle);
         overlayView.setSnapshot(frame);
         overlayView.setInnerMode();
         overlayView.setAngle(angle);
@@ -218,12 +227,12 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
         overlayVisible = false;
         if (overlayAdded) overlayView.setVisibility(android.view.View.GONE);
         captureRequested = false;
-        // Keep the frozen bitmap until the next frame replaces it; this avoids a visible flash
-        // if OriginOS reports a second configuration change during the same physical fold.
+        captureShouldShow = false;
     }
 
-    private void requestFreshFrame() {
+    private void requestFrame(boolean showWhenReady) {
         if (projection == null || imageReader == null) return;
+        captureShouldShow = showWhenReady;
         captureRequested = true;
     }
 
@@ -275,7 +284,6 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
         float scale = longSide > 1440 ? 1440f / longSide : 1f;
         int cw = Math.max(320, Math.round(w * scale));
         int ch = Math.max(320, Math.round(h * scale));
-        // Some encoders/GPU paths prefer even dimensions.
         cw &= ~1; ch &= ~1;
         return new int[]{cw, ch};
     }
@@ -285,15 +293,22 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
         try {
             image = reader.acquireLatestImage();
             if (image == null || !captureRequested) return;
+            boolean shouldShow = captureShouldShow;
             captureRequested = false;
+            captureShouldShow = false;
             Bitmap bmp = imageToBitmap(image);
             if (bmp == null) return;
             main.post(() -> {
-                float a = hasAngle ? smoothedAngle : 180f;
-                showOverlay(bmp, a);
-                if (pendingDemo) {
-                    pendingDemo = false;
-                    runDemoAnimation();
+                if (shouldShow || pendingDemo) {
+                    float a = hasAngle ? smoothedAngle : openReferenceAngle;
+                    showOverlay(bmp, a);
+                    if (pendingDemo) {
+                        pendingDemo = false;
+                        runDemoAnimation();
+                    }
+                } else {
+                    if (prefetchedFrame != null && !prefetchedFrame.isRecycled()) prefetchedFrame.recycle();
+                    prefetchedFrame = bmp;
                 }
             });
         } catch (Exception ignored) {
@@ -323,13 +338,13 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
     private void runDemoAnimation() {
         if (!overlayVisible) return;
         if (demoAnimator != null) demoAnimator.cancel();
-        demoAnimator = ValueAnimator.ofFloat(180f, 18f);
-        demoAnimator.setDuration(1250);
+        demoAnimator = ValueAnimator.ofFloat(openReferenceAngle, 70f);
+        demoAnimator.setDuration(1500);
         demoAnimator.setInterpolator(new android.view.animation.AccelerateDecelerateInterpolator());
         demoAnimator.addUpdateListener(a -> overlayView.setAngle((float) a.getAnimatedValue()));
         demoAnimator.addListener(new android.animation.AnimatorListenerAdapter() {
             @Override public void onAnimationEnd(android.animation.Animator animation) {
-                main.postDelayed(DuoEffectService.this::hideOverlay, 350);
+                main.postDelayed(DuoEffectService.this::hideOverlay, 450);
             }
         });
         demoAnimator.start();
@@ -345,20 +360,38 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
 
         float previous = hasAngle ? smoothedAngle : deg;
         if (!hasAngle) smoothedAngle = deg;
-        else smoothedAngle += (deg - smoothedAngle) * 0.42f;
+        else smoothedAngle += (deg - smoothedAngle) * 0.58f;
         hasAngle = true;
 
-        boolean closing = smoothedAngle < previous - 0.08f;
-        lastAngle = smoothedAngle;
-
-        if (smoothedAngle > ARM_ANGLE) {
-            foldArmed = true;
-            if (overlayVisible && !lastCoverAspect) hideOverlay();
+        if (!overlayVisible && deg > 160f) {
+            openReferenceAngle = Math.max(openReferenceAngle, deg);
+            openReferenceAngle = Math.min(180f, openReferenceAngle);
+            overlayView.setOpenReference(openReferenceAngle);
         }
 
-        if (foldArmed && closing && smoothedAngle < TRIGGER_ANGLE && smoothedAngle > 28f) {
+        boolean closing = smoothedAngle < previous - 0.035f;
+        float armThreshold = Math.max(MIN_ARM_ANGLE, openReferenceAngle - 4.0f);
+        float triggerThreshold = Math.max(160f, openReferenceAngle - TRIGGER_DELTA);
+
+        if (smoothedAngle >= armThreshold) {
+            foldArmed = true;
+            if (overlayVisible && !lastCoverAspect) hideOverlay();
+            long now = SystemClock.uptimeMillis();
+            if (projection != null && now - lastPrefetchMs >= PREFETCH_INTERVAL_MS && !captureRequested) {
+                lastPrefetchMs = now;
+                requestFrame(false);
+            }
+        }
+
+        if (foldArmed && closing && smoothedAngle < triggerThreshold && smoothedAngle > 28f) {
             foldArmed = false;
-            requestFreshFrame();
+            if (prefetchedFrame != null && !prefetchedFrame.isRecycled()) {
+                Bitmap ready = prefetchedFrame;
+                prefetchedFrame = null;
+                showOverlay(ready, smoothedAngle);
+            } else {
+                requestFrame(true);
+            }
         }
 
         if (overlayVisible && !overlayView.isCoverMode()) {
@@ -368,9 +401,9 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
 
     @Override public void onAccuracyChanged(Sensor sensor, int accuracy) { }
 
-    @Override public void onDisplayAdded(int displayId) { main.postDelayed(this::resizeCaptureToCurrentScreen, 100); }
-    @Override public void onDisplayRemoved(int displayId) { main.postDelayed(this::resizeCaptureToCurrentScreen, 100); }
-    @Override public void onDisplayChanged(int displayId) { main.postDelayed(this::resizeCaptureToCurrentScreen, 100); }
+    @Override public void onDisplayAdded(int displayId) { main.postDelayed(this::resizeCaptureToCurrentScreen, 70); }
+    @Override public void onDisplayRemoved(int displayId) { main.postDelayed(this::resizeCaptureToCurrentScreen, 70); }
+    @Override public void onDisplayChanged(int displayId) { main.postDelayed(this::resizeCaptureToCurrentScreen, 70); }
 
     @Override
     public void onDestroy() {
@@ -389,6 +422,8 @@ public class DuoEffectService extends Service implements SensorEventListener, Di
         projection = null;
         if (frozenFrame != null && !frozenFrame.isRecycled()) frozenFrame.recycle();
         frozenFrame = null;
+        if (prefetchedFrame != null && !prefetchedFrame.isRecycled()) prefetchedFrame.recycle();
+        prefetchedFrame = null;
         if (captureThread != null) captureThread.quitSafely();
         stopForeground(STOP_FOREGROUND_REMOVE);
         super.onDestroy();
