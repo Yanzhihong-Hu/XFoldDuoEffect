@@ -1,0 +1,23 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'lab.xfold.duo'
+    compileSdk 35
+
+    defaultConfig {
+        applicationId 'lab.xfold.duo'
+        minSdk 34
+        targetSdk 35
+        versionCode 2
+        versionName '0.2.0'
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+    }
+}
