@@ -10,8 +10,8 @@ android {
         applicationId 'lab.xfold.duo'
         minSdk 34
         targetSdk 35
-        versionCode 4
-        versionName '0.4.0'
+        versionCode 5
+        versionName '0.5.0'
     }
 
     signingConfigs {
@@ -33,4 +33,10 @@ android {
             proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
         }
     }
+}
+
+dependencies {
+    implementation 'androidx.core:core:1.15.0'
+    implementation 'androidx.window:window:1.4.0'
+    implementation 'androidx.window:window-java:1.4.0'
 }
