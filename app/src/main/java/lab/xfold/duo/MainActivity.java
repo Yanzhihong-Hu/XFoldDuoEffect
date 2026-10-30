@@ -61,6 +61,8 @@ public class MainActivity extends Activity implements SensorEventListener, Windo
     private TextView serviceStatus;
     private TextView dualScreenStatus;
     private Button dualScreenButton;
+    private Button movingSideButton;
+    private Button openingButton;
 
     private WindowAreaControllerCallbackAdapter windowAreaController;
     private WindowAreaInfo rearAreaInfo;
@@ -81,6 +83,7 @@ public class MainActivity extends Activity implements SensorEventListener, Windo
         setupDualScreenSupport();
         maybeRequestNotificationPermission();
         refreshStatus();
+        android.util.Log.i("XFoldDuo", "AGSL fold shader: " + shaderCompileStatus());
     }
 
     private void configureWindow() {
@@ -104,7 +107,7 @@ public class MainActivity extends Activity implements SensorEventListener, Windo
 
         TextView title = text("X Fold3 Pro · Duo Effect", 25, Color.rgb(245, 247, 255), true);
         root.addView(title);
-        TextView sub = text("v0.5：内屏 Duo 动画 + Android 官方双屏/外屏能力探测", 13,
+        TextView sub = text("v0.6：合拢（内屏投影 → 外屏由模糊到清晰）+ 展开（内屏由暗到亮）", 13,
                 Color.rgb(151, 160, 190), false);
         LinearLayout.LayoutParams subLp = lp(); subLp.topMargin = dp(6); subLp.bottomMargin = dp(18);
         root.addView(sub, subLp);
@@ -136,12 +139,23 @@ public class MainActivity extends Activity implements SensorEventListener, Windo
         start.setOnClickListener(v -> startDuoEffect());
         root.addView(start, buttonLp());
 
-        dualScreenButton = primaryButton("③ 尝试点亮外屏 / 双屏模式");
-        dualScreenButton.setOnClickListener(v -> toggleDualScreen());
-        dualScreenButton.setEnabled(false);
-        root.addView(dualScreenButton, buttonLp());
+        root.addView(cardTitle("效果设置"));
+        movingSideButton = secondaryButton("");
+        movingSideButton.setOnClickListener(v -> {
+            DuoPrefs.setMovingRight(this, !DuoPrefs.movingRight(this));
+            updateSettingButtons();
+        });
+        root.addView(movingSideButton, buttonLp());
 
-        Button demo = secondaryButton("在当前内屏测试一次动画");
+        openingButton = secondaryButton("");
+        openingButton.setOnClickListener(v -> {
+            DuoPrefs.setOpeningEnabled(this, !DuoPrefs.openingEnabled(this));
+            updateSettingButtons();
+        });
+        root.addView(openingButton, buttonLp());
+        updateSettingButtons();
+
+        Button demo = secondaryButton("在当前内屏测试一次动画（合拢 + 展开）");
         demo.setOnClickListener(v -> sendServiceAction(DuoEffectService.ACTION_DEMO_CLOSE));
         root.addView(demo, buttonLp());
 
@@ -153,26 +167,44 @@ public class MainActivity extends Activity implements SensorEventListener, Windo
         root.addView(stop, buttonLp());
 
         TextView how = text(
-                "这版专门验证你刚发现的问题：内屏特效已经能跑，但 OriginOS 默认不会同时点亮外屏。\n\n" +
-                "• 第 ③ 个按钮调用 Android/Jetpack WindowManager 的官方 dual-screen API。\n" +
-                "• 如果 vivo 在 X Fold3 Pro 上实现了这个能力，外屏会在手机仍展开时被系统正式点亮，并显示 DUO OUTER ACTIVE。\n" +
-                "• 如果状态显示 UNSUPPORTED 或 UNAVAILABLE，说明 OriginOS 没把外屏作为第三方应用可控制的 WindowArea 暴露出来；普通无 Root APK 就不能提前强制点亮它。\n" +
-                "• 若双屏能力可用，下一版会把真实内屏截图和模糊/清晰转换直接送到外屏。",
+                "怎么用：\n" +
+                "• 先在 vivo 设置里打开「合上后外屏继续使用应用」，否则合上会锁屏，锁屏界面会盖住特效。\n" +
+                "• 合拢：开始合拢的瞬间冻结当前画面，运动半屏按固定视点投影，越往外缘越模糊、越暗；外屏亮起后先显示被盖住那半边的画面，再由模糊过渡到清晰的真实外屏界面。\n" +
+                "• 展开：内屏亮起后，运动半屏实时模糊并压暗，随展开角度逐渐清晰。\n" +
+                "• 停在半开（帐篷/笔记本姿态）约 1 秒，特效会自动淡出，不会挡住屏幕。\n" +
+                "• 效果不对时，先合拢/展开一次，再点下面「分享完整诊断报告」，报告里有每一步的事件日志。",
                 13, Color.rgb(177, 185, 210), false);
         how.setPadding(dp(14), dp(14), dp(14), dp(14));
         LinearLayout.LayoutParams howLp = cardLp(); howLp.topMargin = dp(6); howLp.bottomMargin = dp(16);
         root.addView(how, howLp);
 
+        root.addView(cardTitle("实验：外屏提前点亮"));
+        dualScreenButton = secondaryButton("尝试点亮外屏 / 双屏模式");
+        dualScreenButton.setOnClickListener(v -> toggleDualScreen());
+        dualScreenButton.setEnabled(false);
+        root.addView(dualScreenButton, buttonLp());
+
         Button report = secondaryButton("分享完整诊断报告（传感器 + 屏幕）");
         report.setOnClickListener(v -> shareSensorReport());
         root.addView(report, buttonLp());
 
-        TextView note = text("目标仍然是：内屏画面固定投影并渐进失焦，同时外屏提前亮起并从模糊过渡到清晰。v0.5 先确认 vivo 是否开放了官方双屏通道。",
+        TextView note = text("iPhone Duo 的外屏在合拢途中就会亮起；X Fold3 Pro 的外屏要等合上才由系统点亮，第三方应用无法提前点亮（除非上面的实验显示 AVAILABLE）。所以这里的外屏过渡从合上那一刻开始。",
                 12, Color.rgb(126, 137, 168), false);
         LinearLayout.LayoutParams nLp = lp(); nLp.topMargin = dp(12);
         root.addView(note, nLp);
 
         return scroll;
+    }
+
+    private void updateSettingButtons() {
+        if (movingSideButton != null) {
+            movingSideButton.setText(DuoPrefs.movingRight(this)
+                    ? "运动半屏：右半（外屏在右半背面时用）"
+                    : "运动半屏：左半（X Fold3 Pro 默认）");
+        }
+        if (openingButton != null) {
+            openingButton.setText(DuoPrefs.openingEnabled(this) ? "展开特效：开" : "展开特效：关");
+        }
     }
 
     private void setupDualScreenSupport() {
@@ -214,25 +246,25 @@ public class MainActivity extends Activity implements SensorEventListener, Windo
         if (rearSession != null) {
             s = "ACTIVE · 外屏双屏会话已启动";
             enable = true;
-            dualScreenButton.setText("③ 关闭外屏双屏模式");
+            dualScreenButton.setText("关闭外屏双屏模式");
             dualScreenStatus.setTextColor(Color.rgb(177, 241, 197));
         } else if (rearPresentStatus.equals(WindowAreaCapability.Status.WINDOW_AREA_STATUS_AVAILABLE)) {
             s = "AVAILABLE · vivo 已开放双屏外屏 API";
             enable = true;
-            dualScreenButton.setText("③ 点亮外屏 / 启动双屏模式");
+            dualScreenButton.setText("点亮外屏 / 启动双屏模式");
             dualScreenStatus.setTextColor(Color.rgb(177, 241, 197));
         } else if (rearPresentStatus.equals(WindowAreaCapability.Status.WINDOW_AREA_STATUS_ACTIVE)) {
             s = "ACTIVE · 系统报告双屏已被占用/激活";
             enable = false;
-            dualScreenButton.setText("③ 外屏双屏模式");
+            dualScreenButton.setText("外屏双屏模式");
             dualScreenStatus.setTextColor(Color.rgb(177, 241, 197));
         } else if (rearPresentStatus.equals(WindowAreaCapability.Status.WINDOW_AREA_STATUS_UNAVAILABLE)) {
             s = "UNAVAILABLE · 当前姿态/系统状态不允许第三方点亮外屏";
-            dualScreenButton.setText("③ 外屏双屏模式当前不可用");
+            dualScreenButton.setText("外屏双屏模式当前不可用");
             dualScreenStatus.setTextColor(Color.rgb(255, 207, 133));
         } else {
             s = "UNSUPPORTED · OriginOS 未向第三方开放双屏外屏能力";
-            dualScreenButton.setText("③ 外屏双屏模式不受支持");
+            dualScreenButton.setText("外屏双屏模式不受支持");
             dualScreenStatus.setTextColor(Color.rgb(255, 166, 143));
         }
         dualScreenStatus.setText("外屏双屏能力：" + s);
@@ -411,6 +443,10 @@ public class MainActivity extends Activity implements SensorEventListener, Windo
                 .append("\nWindowArea rear present status=").append(rearPresentStatus)
                 .append("\nWindowArea rear area present=").append(rearAreaInfo != null)
                 .append("\nWindowArea session active=").append(rearSession != null)
+                .append("\nCross-window blur enabled=").append(crossWindowBlurEnabled())
+                .append("\nMoving half=").append(DuoPrefs.movingRight(this) ? "right" : "left")
+                .append("\nOpening effect=").append(DuoPrefs.openingEnabled(this))
+                .append("\nShader compiles=").append(shaderCompileStatus())
                 .append("\n\nDISPLAY REPORT\n");
 
         DisplayManager dm = (DisplayManager) getSystemService(Context.DISPLAY_SERVICE);
@@ -423,15 +459,34 @@ public class MainActivity extends Activity implements SensorEventListener, Windo
                         .append(" flags=0x").append(Integer.toHexString(d.getFlags()))
                         .append(" size=").append(mode.getPhysicalWidth()).append("x").append(mode.getPhysicalHeight())
                         .append(" refresh=").append(mode.getRefreshRate())
+                        .append(" rotation=").append(d.getRotation())
                         .append("\n");
             }
         }
+        report.append("\nEFFECT EVENT LOG\n").append(DuoLog.dump());
 
         Intent i = new Intent(Intent.ACTION_SEND);
         i.setType("text/plain");
         i.putExtra(Intent.EXTRA_SUBJECT, "X Fold Duo full diagnostic report");
         i.putExtra(Intent.EXTRA_TEXT, report.toString());
         startActivity(Intent.createChooser(i, "分享完整诊断报告"));
+    }
+
+    private boolean crossWindowBlurEnabled() {
+        try {
+            return getSystemService(WindowManager.class).isCrossWindowBlurEnabled();
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    private static String shaderCompileStatus() {
+        try {
+            new android.graphics.RuntimeShader(DuoOverlayView.AGSL);
+            return "OK";
+        } catch (Throwable t) {
+            return "FAILED " + safeMessage(t);
+        }
     }
 
     private static String displayStateName(int state) {
